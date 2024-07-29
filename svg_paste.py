@@ -73,9 +73,9 @@ def rotate_svg_onto_plane(svg_obj, view_plane):
         
 class SVGPasteSettings(bpy.types.PropertyGroup):
     convert_to_mesh_after_pasting: bpy.props.BoolProperty(
-        name="Convert to Curve After Pasting",
+        name="Convert to Mesh After Pasting",
         description="Convert to curve after pasting SVG",
-        default=False
+        default=True
     )
     triangulate_after_pasting: bpy.props.BoolProperty(
         name="Triangulate After Pasting",
@@ -226,6 +226,8 @@ class OBJECT_OT_Triangulate(bpy.types.Operator):
         print(f"Triangulating with method: {svg_paste.triangulation_method}...")
 
         obj = bpy.context.active_object
+
+        # does this empty the object? who knows...
         poly = triangulate.obj_to_poly(obj)
 
         triangulation_method = svg_paste.triangulation_method.lower()
