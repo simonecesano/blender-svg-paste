@@ -7,6 +7,11 @@ import tempfile
 import mathutils
 import bmesh
 import shapely
+import re
+import time
+import numpy as np
+from mathutils import Vector
+
 
 if os.path.dirname(os.path.abspath(__file__)) not in sys.path:
     sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -29,13 +34,30 @@ def get_current_view_plane(space):
     else:
         return "Non-orthographic"
 
+def get_svg_from_clipboard():
+    os_name = sys.platform
+    result = None
+    
+    if os_name == "darwin":
+        result = subprocess.run(['osascript', '-e', 'get the clipboard as «class svg »'], stdout=subprocess.PIPE)
+        stdout = result.stdout.decode('utf-8')
+        stdout = re.sub(r'.data svg.', '', stdout)
+        stdout = re.sub(r'.$', '', stdout)
+        svg_hex = bytes.fromhex(stdout)
+        return svg_hex
+    elif os_name.lower().startswith("linux"):
+        result = subprocess.run(['xclip', '-selection', 'clipboard', '-t', 'image/svg+xml', '-o'], stdout=subprocess.PIPE)
+        return result.stdout
+    else:
+        raise RuntimeError("Cannot get data from clipboard on {}".format(os_name))
+        
+    if result.returncode != 0:
+        raise RuntimeError("Failed to get SVG clipboard content")
+
+    
 def import_svg_from_clipboard(view_plane):
     try:
-        # Get SVG content from clipboard
-        result = subprocess.run(['xclip', '-selection', 'clipboard', '-t', 'image/svg+xml', '-o'], stdout=subprocess.PIPE)
-        if result.returncode != 0:
-            raise RuntimeError("Failed to get clipboard content with xclip")
-        svg_content = result.stdout
+        svg_content = get_svg_from_clipboard()
 
         # Create a temporary file to save the SVG content
         temp_svg_filepath = None
@@ -70,6 +92,21 @@ def rotate_svg_onto_plane(svg_obj, view_plane):
         print("Error: Non-orthographic view")
 
 # --------------------------------------------------------------------------
+
+def get_edge_lengths(edges):
+    if not edges: return
+
+    edge_lengths = []
+    for edge in edges:
+        # Get the vertices of the edge
+        v1 = mesh.data.vertices[edge.vertices[0]].co
+        v2 = mesh.data.vertices[edge.vertices[1]].co
+        
+        # Calculate the length of the edge
+        length = (v1 - v2).length
+        edge_lengths.append(length)
+    return sum(edge_lengths) / len(edge_lengths)
+
         
 class SVGPasteSettings(bpy.types.PropertyGroup):
     convert_to_mesh_after_pasting: bpy.props.BoolProperty(
@@ -99,6 +136,13 @@ class SVGPasteSettings(bpy.types.PropertyGroup):
         name="Triangulation points",
         description="Number of triangulation points",
         default=1000
+    )
+    container_tolerance: bpy.props.FloatProperty(
+        name="Container tolerance",
+        description="Tolerance for checking if triangle is contained",
+        default=0.001,
+        soft_min=0.0,
+        step=0.1
     )
     keep_original: bpy.props.BoolProperty(
         name="Keep Original",
@@ -133,13 +177,16 @@ class OBJECT_PT_SVGPastePanel(bpy.types.Panel):
         # Button to paste SVG
         layout.operator("object.paste_svg", text="Paste SVG")
 
+        layout.separator()
+        layout.operator("object.convert_to_mesh", text="Convert to Curve")
+    
         # Boolean input for keep_original, numper of points
         layout.prop(svg_paste, "keep_original")
         layout.prop(svg_paste, "triangulation_points")
+        layout.prop(svg_paste, "container_tolerance")
 
         layout.separator()
         # Button to convert to curve
-        layout.operator("object.convert_to_mesh", text="Convert to Curve")
 
         # Button to triangulate
         layout.operator("object.triangulate", text="Triangulate")
@@ -194,8 +241,6 @@ class OBJECT_OT_PasteSVG(bpy.types.Operator):
         if svg_paste.triangulate_after_pasting:
             start_objects = [ o.name for o in bpy.data.objects ]
             pasted_objs = [ o for o in bpy.data.objects if o.name not in start_objects ]
-
-
             pass
             # Call triangulate function
 
@@ -222,33 +267,53 @@ class OBJECT_OT_Triangulate(bpy.types.Operator):
 
     def triangulate_obj(self, context):
         svg_paste = context.scene.svg_paste
-
-        print(f"Triangulating with method: {svg_paste.triangulation_method}...")
-
         obj = bpy.context.active_object
-
-        # does this empty the object? who knows...
-        poly = triangulate.obj_to_poly(obj)
-
+        saved_mode = obj.mode
+        if obj.mode != 'EDIT': bpy.ops.object.mode_set(mode='EDIT')
         triangulation_method = svg_paste.triangulation_method.lower()
-
-        print(f"Triangulating with method: {triangulation_method} and {svg_paste.triangulation_points} points...")
-
         bpy.ops.ed.undo_push(message=f"Triangulating with method: {triangulation_method}...")
-        points = getattr(triangulate, triangulation_method)(poly, svg_paste.triangulation_points)
+        
+        poly = triangulate.obj_to_poly(obj)
+        points = getattr(triangulate, "random_points_sampling")(poly, svg_paste.triangulation_points) # like triangulate.some_method(blah, blah)
         mesh = triangulate.triangulate_poly_and_points(poly, points)
-        obj.data = mesh
+
+        bm_t = bmesh.new()
+        bm_t.from_mesh(mesh)
+        edges_inside = [ e for e in bm_t.edges if len(e.link_faces) > 1]
+        avg_length_inside = sum([ e.calc_length() for e in edges_inside]) / len(edges_inside)
+        bm_t.free()
+        
+
+
+        bm_s = bmesh.from_edit_mesh(obj.data)
+        bm_s.edges.ensure_lookup_table()
+        print("Vertices before subdiv: {}".format(len(obj.data.vertices)))
+        print("Vertices in bmesh before subdiv: {}".format(len(bm_s.verts)))
+        
+        edges_outside = [ e for e in bm_s.edges if len(e.link_faces) <= 1]
+
+        for e in [ e for e in edges_outside if e.calc_length() >= 2 * avg_length_inside ]:
+            d = int(e.calc_length() / avg_length_inside)
+            bmesh.ops.subdivide_edges(bm_s, edges=[e], cuts=d, use_grid_fill=True)
+
+        print("Vertices in bmesh after subdiv: {}".format(len(bm_s.verts)))
+        bmesh.update_edit_mesh(obj.data)
+        print("Vertices after subdiv: {}".format(len(obj.data.vertices)))
+        poly = triangulate.obj_to_poly(bm_s)
+        bm_s.free()        
+
+        points = getattr(triangulate, triangulation_method)(poly, svg_paste.triangulation_points) # like triangulate.some_method(blah, blah)
+        mesh = triangulate.triangulate_poly_and_points(poly, points)
+        
+        bm_u = bmesh.from_edit_mesh(obj.data)
+        bm_u.clear()
+        bm_u.from_mesh(mesh)
+        bmesh.update_edit_mesh(obj.data)
+        bm_u.free()
+        if obj.mode != saved_mode: bpy.ops.object.mode_set(mode=saved_mode)
+
 
         
-        # print(triangulate.obj_to_shape_01(obj))
-        # print(triangulate.obj_to_shape_02(obj))
-
-        # script_file_path = "/home/simone/uv_experiments/foobar.py"; 
-        # exec(open(script_file_path).read()) if __import__('os').path.isfile(script_file_path) else print(f"Script file '{script_file_path}' not found.")
-        
-        # Placeholder function for triangulating
-        # Your code to triangulate goes here
-
 class OBJECT_OT_AlignAndResize(bpy.types.Operator):
     bl_idname = "object.align_and_resize"
     bl_label = "Align and Resize"
