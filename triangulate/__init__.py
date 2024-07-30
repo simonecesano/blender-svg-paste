@@ -103,10 +103,6 @@ def triangulate_poly_and_points(poly, points, shape_buffer=0.001):
 
     
     triangles = [ t for t in shapely.ops.triangulate(shapely.MultiPoint(pts)) ]
-    # for t in triangles[0:2]:
-    #     print(shapely.intersection(poly, t))
-        
-    # triangles = [ t for t in triangles if r.contains(t.centroid) ]
     triangles = [ shapely.intersection(poly, t) for t in triangles ]
     
     points = {}
