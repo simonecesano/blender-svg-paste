@@ -298,6 +298,7 @@ class OBJECT_OT_Triangulate(bpy.types.Operator):
 
         print("Vertices in bmesh after subdiv: {}".format(len(bm_s.verts)))
         bmesh.update_edit_mesh(obj.data)
+        obj.update_from_editmode()
         print("Vertices after subdiv: {}".format(len(obj.data.vertices)))
         poly = triangulate.obj_to_poly(bm_s)
         bm_s.free()        
